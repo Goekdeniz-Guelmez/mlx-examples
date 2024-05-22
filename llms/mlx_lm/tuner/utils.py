@@ -9,8 +9,9 @@ import mlx.nn as nn
 import mlx.optimizers as opt
 from mlx.utils import tree_unflatten
 
+from ..models.switch_layers import QuantizedSwitchLinear, SwitchLinear
 from .dora import DoRALinear
-from .lora import LoRALinear
+from .lora import LoRALinear, LoRASwitchLinear
 
 
 def build_schedule(schedule_config: Dict):
@@ -53,16 +54,30 @@ def linear_to_lora_layers(
     """
 
     num_layers = len(model.layers)
+
+    if num_lora_layers < 0:
+        num_lora_layers = num_layers
+
     if num_lora_layers > num_layers:
         raise ValueError(
             f"Requested {num_lora_layers} LoRA layers "
             f"but the model only has {num_layers} layers."
         )
-    cls = DoRALinear if use_dora else LoRALinear
 
-    def to_lora(lin):
-        return cls.from_linear(
-            lin,
+    def to_lora(layer):
+        if isinstance(layer, (nn.Linear, nn.QuantizedLinear)):
+            LoRALayer = DoRALinear if use_dora else LoRALinear
+        elif isinstance(layer, (SwitchLinear, QuantizedSwitchLinear)):
+            if use_dora:
+                raise ValueError(f"{type(layer).__name__} doesn't support DoRA yet.")
+            LoRALayer = LoRASwitchLinear
+        else:
+            raise ValueError(
+                f"Can't convert layer of type {type(layer).__name__} to LoRA"
+            )
+
+        return LoRALayer.from_linear(
+            layer,
             r=config["rank"],
             alpha=config["alpha"],
             scale=config["scale"],
@@ -94,6 +109,9 @@ def linear_to_lora_layers(
         if model.model_type == "qwen2_moe":
             keys.add("mlp.gate")
             keys.add("mlp.shared_expert_gate")
+
+    elif model.model_type == "gpt_bigcode":
+        keys = set(["attn.c_attn"])
     elif model.model_type == "olmo":
         keys = set(["att_proj"])
     elif model.model_type == "openelm":

@@ -24,7 +24,13 @@ class ModelArgs(BaseModelArgs):
     vocab_size: int
     dropout: float = 0.0
     bias: bool = False
-    n_kv_heads: Optional[int] = 2 # TODO GPT2 does NOT need that but the code from base.py requires it. Investigate
+    multi_query: bool = True
+    n_kv_heads: int = None
+    tie_word_embeddings: bool = True
+
+    def __post_init__(self):
+        if self.n_kv_heads is None:
+            self.n_kv_heads = 1 if self.multi_query else self.n_head
 
 
 class Attention(nn.Module):
@@ -124,28 +130,6 @@ class Model(nn.Module):
         ]
         self.ln_f = nn.LayerNorm(args.n_embd, eps=args.layer_norm_epsilon, bias=args.bias)
 
-    # def __call__(
-    #     self,
-    #     inputs: mx.array,
-    #     cache=None,
-    # ):
-    #     B, L = inputs.shape
-    #     pos = mx.arange(0, L, 1, dtype=inputs.dtype)
-
-    #     tok_emb = self.wte(inputs)
-    #     pos_emb = self.wpe(pos)
-    #     x = self.drop(tok_emb + pos_emb)
-
-    #     mask = nn.MultiHeadAttention.create_additive_causal_mask(L)
-    #     mask = mask.astype(x.dtype)
-
-    #     if cache is None:
-    #         cache = [None] * len(self.h)
-
-    #     for e, layer in enumerate(self.h):
-    #         x, cache[e] = layer(x, mask, cache[e])
-
-    #     return self.ln_f(x) @ self.wte.weight.T, cache
 
     def _forward_transformer_blocks(
         self, x: mx.array, pos: mx.array, mask=None, cache=None, build_cache=False
@@ -206,39 +190,3 @@ class Model(nn.Module):
     @property
     def n_kv_heads(self):
         return self.args.n_kv_heads
-
-
-# class Model(nn.Module):
-#     def __init__(self, args: ModelArgs):
-#         super().__init__()
-#         self.model_type = args.model_type
-
-#         self.n_kv_heads = args.n_kv_heads # because base.py
-#         self.head_dim = args.n_embd // args.n_head # because base.py
-
-#         self.bias = args.bias
-#         self.transformer = GPTModel(args)
-
-#     def __call__(self, inputs: mx.array, cache=None):
-#         out = self.transformer(inputs, cache)
-#         return out
-
-#     def sanitize(self, weights):
-#         transpose_suffixes = (
-#             "attn.c_attn.weight",
-#             "attn.c_proj.weight",
-#             "mlp.c_fc.weight",
-#             "mlp.c_proj.weight",
-#         )
-
-#         for key in list(weights.keys()):
-#             if key.endswith(transpose_suffixes):
-#                 weights[key] = weights[key].T
-
-#         if not self.bias:
-#             weights = {k: v for k, v in weights.items() if 'bias' not in k}
-#         return weights
-
-#     @property
-#     def layers(self):
-#         return self.transformer.h

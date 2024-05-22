@@ -7,7 +7,7 @@ import mlx.nn as nn
 import numpy as np
 from numpy.core.multiarray import array
 
-from .base import BaseModelArgs
+from .base import BaseModelArgs, create_additive_causal_mask
 
 @dataclass
 class ModelArgs(BaseModelArgs):
@@ -117,9 +117,10 @@ class GPT2Block(nn.Module):
 class Model(nn.Module):
     def __init__(self, args: ModelArgs):
         super().__init__()
+        self.model_type = args.model_type
+
         self.args = args
         self.bias = args.bias
-        self.model_type = args.model_type
 
         self.wte = nn.Embedding(args.vocab_size, args.n_embd)
         self.wpe = nn.Embedding(args.n_ctx, args.n_embd)
@@ -162,6 +163,7 @@ class Model(nn.Module):
         x, _ = self._forward_transformer_blocks(x, pos, mask=mask, build_cache=True)
 
         return x @ self.wte.weight.T
+
 
     def sanitize(self, weights):
         transpose_suffixes = (

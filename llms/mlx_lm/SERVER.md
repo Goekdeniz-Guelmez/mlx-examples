@@ -4,15 +4,17 @@ You use `mlx-lm` to make an HTTP API for generating text with any supported
 model. The HTTP API is intended to be similar to the [OpenAI chat
 API](https://platform.openai.com/docs/api-reference).
 
-> [!NOTE]  
+> [!NOTE]
 > The MLX LM server is not recommended for production as it only implements
 > basic security checks.
 
-Start the server with: 
+Start the server with:
 
 ```shell
 mlx_lm.server --model <path_to_model_or_hf_repo>
 ```
+
+mlx_lm.server --model /Users/gokdenizgulmez/Desktop/Mistral-7B-v0.3-4bit --port 1298
 
 For example:
 
@@ -37,6 +39,128 @@ curl localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
      "messages": [{"role": "user", "content": "Say this is a test!"}],
+     "temperature": 0.7
+   }'
+```
+
+```shell
+curl localhost:1298/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+     "messages": [{"role": "user", "content": "whats the current weather in stuttgart"}],
+     "tools": [
+         {
+             "type": "function",
+             "function": {
+                 "name": "get_current_weather",
+                 "description": "Get the current weather",
+                 "parameters": {
+                     "type": "object",
+                     "properties": {
+                         "location": {
+                             "type": "string",
+                             "description": "The city and state, e.g. San Francisco, CA",
+                         },
+                         "format": {
+                             "type": "string",
+                             "enum": ["celsius", "fahrenheit"],
+                             "description": "The temperature unit to use. Infer this from the users location.",
+                         },
+                     },
+                     "required": ["location", "format"],
+                 },
+             }
+         },
+         {
+             "type": "function",
+             "function": {
+                 "name": "get_n_day_weather_forecast",
+                 "description": "Get an N-day weather forecast",
+                 "parameters": {
+                     "type": "object",
+                     "properties": {
+                         "location": {
+                             "type": "string",
+                             "description": "The city and state, e.g. San Francisco, CA",
+                         },
+                         "format": {
+                             "type": "string",
+                             "enum": ["celsius", "fahrenheit"],
+                             "description": "The temperature unit to use. Infer this from the users location.",
+                         },
+                         "num_days": {
+                             "type": "integer",
+                             "description": "The number of days to forecast",
+                         }
+                     },
+                     "required": ["location", "format", "num_days"]
+                 },
+             }
+         }
+     ],
+     "temperature": 0.7
+   }'
+```
+
+```shell
+curl localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+     "messages": [
+      {"role": "user", "content": "Say this is a test!"}
+      {"role": "assist", "content": "Say this is a test!"}
+      {"role": "user", "content": "Say this is a test!"}
+      ],
+     "tools": [
+         {
+             "type": "function",
+             "function": {
+                 "name": "get_current_weather",
+                 "description": "Get the current weather",
+                 "parameters": {
+                     "type": "object",
+                     "properties": {
+                         "location": {
+                             "type": "string",
+                             "description": "The city and state, e.g. San Francisco, CA",
+                         },
+                         "format": {
+                             "type": "string",
+                             "enum": ["celsius", "fahrenheit"],
+                             "description": "The temperature unit to use. Infer this from the users location.",
+                         },
+                     },
+                     "required": ["location", "format"],
+                 },
+             }
+         },
+         {
+             "type": "function",
+             "function": {
+                 "name": "get_n_day_weather_forecast",
+                 "description": "Get an N-day weather forecast",
+                 "parameters": {
+                     "type": "object",
+                     "properties": {
+                         "location": {
+                             "type": "string",
+                             "description": "The city and state, e.g. San Francisco, CA",
+                         },
+                         "format": {
+                             "type": "string",
+                             "enum": ["celsius", "fahrenheit"],
+                             "description": "The temperature unit to use. Infer this from the users location.",
+                         },
+                         "num_days": {
+                             "type": "integer",
+                             "description": "The number of days to forecast",
+                         }
+                     },
+                     "required": ["location", "format", "num_days"]
+                 },
+             }
+         },
+     ]
      "temperature": 0.7
    }'
 ```

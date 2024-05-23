@@ -181,6 +181,33 @@ class Model(nn.Module):
             weights = {k: v for k, v in weights.items() if 'bias' not in k}
         return weights
 
+
+            keys = [
+                k for k in sd_hf if not k.endswith("attn.masked_bias")
+            ]  # ignore these
+            transposed = [
+                "attn.c_attn.weight",
+                "attn.c_proj.weight",
+                "mlp.c_fc.weight",
+                "mlp.c_proj.weight",
+            ]
+            # basically the openai checkpoints use a "Conv1D" module, but we only
+            # want to use a vanilla nn.Linear. this means that we have to
+            # transpose these weights when we import them
+            for k in keys:
+                if any(k.endswith(w) for w in transposed):
+                    # special treatment for the Conv1D weights we need to transpose
+                    assert sd_hf[k].shape[::-1] == sd[k].shape
+                    with torch.no_grad():
+                        sd[k].copy_(sd_hf[k].t())
+                else:
+                    # vanilla copy over the other parameters
+                    assert sd_hf[k].shape == sd[k].shape
+                    with torch.no_grad():
+                        sd[k].copy_(sd_hf[k])
+
+            return model
+
     @property
     def layers(self):
         return self.h

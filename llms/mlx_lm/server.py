@@ -51,13 +51,15 @@ def stopping_criteria(
     return StopCondition(stop_met=False, trim_length=0)
 
 
-def convert_chat(messages: List[dict], role_mapping: Optional[dict] = None):
+def convert_chat(messages: List[dict], role_mapping: Optional[dict] = None, tools: Optional[List[dict]] = None):
     default_role_mapping = {
         "system_prompt": "A chat between a curious user and an artificial intelligence assistant. The assistant follows the given rules no matter what.",
         "system": "ASSISTANT's RULE: ",
         "user": "USER: ",
         "assistant": "ASSISTANT: ",
         "stop": "\n",
+        "function_call": "FUNCTION CALL: ",
+        "function_response": "FUNCTION RESPONSE: ",
     }
     role_mapping = role_mapping if role_mapping is not None else default_role_mapping
 
@@ -67,6 +69,13 @@ def convert_chat(messages: List[dict], role_mapping: Optional[dict] = None):
         stop = role_mapping.get("stop", "")
         content = line.get("content", "")
         prompt += f"{role_prefix}{content}{stop}"
+
+    if tools:
+        prompt += "[TOOL_CALLS]\n"
+        for tool in tools:
+            tool_call = json.dumps(tool)
+            prompt += f"{role_mapping.get('function_call')}{tool_call}{role_mapping.get('stop')}"
+        prompt += "[/TOOL_CALLS]\n"
 
     prompt += role_mapping.get("assistant", "")
     return prompt.rstrip()
@@ -429,6 +438,9 @@ class APIHandler(BaseHTTPRequestHandler):
             "chat.completions.chunk" if self.stream else "chat.completions"
         )
 
+        # Extract tools from the request body if provided
+        tools = body.get("tools", [])
+
         if (
             hasattr(self.tokenizer, "apply_chat_template")
             and self.tokenizer.chat_template
@@ -440,9 +452,74 @@ class APIHandler(BaseHTTPRequestHandler):
             )
         else:
             prompt = convert_chat(body["messages"], body.get("role_mapping"))
-            prompt = self.tokenizer.encode(prompt)
 
+        if tools:
+            tool_responses = self.handle_tools(tools)
+            tool_messages = [
+                {"role": "function_response", "content": tool_responses}
+            ]
+            # Convert tool responses to chat format and encode
+            prompt += convert_chat(tool_messages, body.get("role_mapping"))
+
+        prompt = self.tokenizer.encode(prompt)
         return mx.array(prompt)
+
+
+
+    def handle_tools(self, tools: List[dict]) -> str:
+        """
+        Handle the execution of tools/functions and return their results as a formatted string.
+
+        Args:
+            tools (List[dict]): List of tools/functions to be executed.
+
+        Returns:
+            str: A string containing the results of the executed tools/functions.
+        """
+        results = "[TOOL_RESULTS]\n"
+        for tool in tools:
+            func_name = tool['function']['name']
+            params = tool['function']['parameters']
+            print(f"Function call: {func_name} with parameters {params}")
+            result = self.execute_function(func_name, params)
+            print(f"Function response: {result}")
+            results += f"{json.dumps(result)}\n"
+        results += "[/TOOL_RESULTS]\n"
+
+        return results
+
+    def execute_function(self, func_name: str, params: dict) -> dict:
+        """
+        Execute a given function with parameters and return the result.
+
+        Args:
+            func_name (str): The name of the function to be executed.
+            params (dict): The parameters to pass to the function.
+
+        Returns:
+            dict: The result of the function execution.
+        """
+        # Placeholder function implementation
+        # You need to implement this based on your specific functions and environment
+        if func_name == "get_current_weather":
+            result = {
+                "location": params["location"],
+                "temperature": "20°C",
+                "condition": "Sunny"
+            }
+        elif func_name == "get_n_day_weather_forecast":
+            result = {
+                "location": params["location"],
+                "forecast": [
+                    {"day": 1, "temperature": "22°C", "condition": "Partly cloudy"},
+                    {"day": 2, "temperature": "18°C", "condition": "Rainy"},
+                ]
+            }
+        else:
+            result = {"error": f"Function {func_name} not implemented"}
+
+        return result
+
 
     def handle_text_completions(self) -> mx.array:
         """

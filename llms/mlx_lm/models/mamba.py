@@ -3,6 +3,7 @@ from typing import Dict, Optional, Tuple, Union
 
 import mlx.core as mx
 import mlx.nn as nn
+import numpy as np
 import math
 
 from .base import BaseModelArgs
@@ -34,85 +35,28 @@ class ModelArgs(BaseModelArgs):
 
     pscan: bool = False # use parallel scan mode or sequential mode when training. on MLX, the pscan isn't performant.
 
-    def __post_init__(self):
-        self.hidden_size = self.expand * self.d_model # E*D = ED in comments
 
-def softplus(x, beta=1, threshold=20):
-    scaled_x = beta * x
-    mask = scaled_x > threshold
-    return mx.where(mask, x, 1/beta * mx.logaddexp(0, x))
+class MambaCache:
 
-def unsqueeze(x, axis):
-    """
-    Same API as PyTorch.
-    """
+    def __init__(
+        self, args: ModelArgs, batch_size: int
+    ):
+        self.seqlen_offset = 0
+        intermediate_size = args.intermediate_size
+        ssm_state_size = args.state_size
+        conv_kernel_size = args.conv_kernel
 
-    assert axis <= len(x.shape)
-    if axis >= 0:
-        new_shape = x.shape[:axis] + tuple([1]) + x.shape[axis:]
-    else:
-        new_shape = x.shape + tuple([1])
-    return x.reshape(new_shape)
-
-def clamp(x, min=None, max=None):
-    mask_lower = None
-    mask_upper = None
-    if min is not None:
-        mask_lower = x < min
-    if max is not None:
-        mask_upper = x > max
-
-    if min is not None:
-        if max is not None:
-            return mx.where(mask_upper, max, mx.where(mask_lower, min, x))
-        return mx.where(mask_lower, min, x)
-
-    return mx.where(mask_upper, max, x)
-
-def topk(x, k):
-    """
-    Returns the top k biggest values of x along the 2nd dim.
-
-    Args:
-        x : (B, vocab_size). can be probs or logits
-
-    Returns:
-        values : (B, k). ordered from lowest to biggest val
-    """
-
-    return mx.sort(x)[:, -k:]
-
-class DepthWiseConv1d(nn.Module):
-    def __init__(self, channels, kernel_size, bias, padding):
-        super().__init__()
-
-        self.channels = channels
-        self.kernel_size = kernel_size
-        self.bias = bias
-        self.padding = padding
-
-        self.conv1d = nn.Conv1d(in_channels=channels, out_channels=channels,
-                                kernel_size=kernel_size, bias=True, padding=padding)
-
-        # see comment below
-        indices = mx.arange(channels)
-        mask = mx.zeros_like(self.conv1d.weight)
-        mask[indices, :, indices] = 1
-        self.conv1d.weight *= mask
-
-    def __call__(self, x):
-        return self.conv1d(x)
+        self.conv_states = {
+            i: mx.zeros(batch_size, intermediate_size)
+            for i in range(args.n_layer)
+        }
+        self.ssm_states = {
+            i: mx.zeros(batch_size, intermediate_size)
+            for i in range(args.n_layer)
+        }
 
 
 def pscan_f(A, X):
-    # A : (B, D, L, N)
-    # X : (B, D, L, N)
-
-    # modifies X in place by doing a parallel scan.
-    # more formally, X will be populated by these values :
-    # H[t] = A[t] * H[t-1] + X[t] with H[0] = 0
-    # which are computed in parallel (2*log2(T) sequential steps (ideally), instead of T sequential steps)
-
     Aa = A
     Xa = X
 
@@ -144,8 +88,6 @@ def pscan_f(A, X):
         step_len = Xa.shape[2]
         T = 2 * (step_len // 2)
 
-        last_val_aa = None
-        last_val_xa = None
         if T < step_len:
             last_val_aa = Aa[:, :, -1] * Aa[:, :, -2]
             last_val_xa = Xa[:, :, -1] + Aa[:, :, -1] * Xa[:, :, -2]
@@ -163,7 +105,7 @@ def pscan_f(A, X):
             A[:, :, 2**k-1::2**(k+1)] = mx.concatenate([Aa[:, :, :, 0], mx.array([last_val_aa]).reshape(B, D, 1, -1)], axis=2)
             X[:, :, 2**k-1::2**(k+1)] = mx.concatenate([Xa[:, :, :, 0], mx.array([last_val_xa]).reshape(B, D, 1, -1)], axis=2)
 
-# main function, used in the Mamba model (mamba_mlx.py)
+
 def pscan(A_in, X_in):
     """
     Applies the parallel scan operation, as defined above. Returns a new tensor.
@@ -184,25 +126,43 @@ def pscan(A_in, X_in):
     return X.transpose(0, 2, 1, 3)
 
 
-class MambaBlock(nn.Module):
-    def __init__(self, args: ModelArgs):
-        super().__init__()
-        self.args = args
-        self.residual_in_fp32 = args.residual_in_fp32
+def softplus(x, beta=1, threshold=20):
+    scaled_x = beta * x
+    mask = scaled_x > threshold
+    return mx.where(mask, x, 1/beta * mx.logaddexp(0, x))
 
-        self.norm = nn.RMSNorm(args.hidden_size, eps=args.layer_norm_epsilon)
-        self.mixer = MambaMixer(args)
 
-    def __call__(self, x): #, cache_params: Optional[MambaCache] = None):
-        h = self.norm(x.to(dtype=self.norm.weight.dtype))
-        if self.residual_in_fp32:
-            residual = x.to(torch.float32)
-        h = self.mixer(h ) #), cache_params=cache_params)
-        r = x + h
-        return r
+def unsqueeze(x, axis):
+    assert axis <= len(x.shape)
+    if axis >= 0:
+        new_shape = x.shape[:axis] + tuple([1]) + x.shape[axis:]
+    else:
+        new_shape = x.shape + tuple([1])
+    return x.reshape(new_shape)
+
+
+def clamp(x, min=None, max=None):
+    if min is not None:
+        mask_lower = x < min
+    if max is not None:
+        mask_upper = x > max
+
+    if min is not None:
+        if max is not None:
+            return mx.where(mask_upper, max, mx.where(mask_lower, min, x))
+        return mx.where(mask_lower, min, x)
+
+    return mx.where(mask_upper, max, x)
 
 
 class MambaMixer(nn.Module):
+    """
+    Compute ∆, A, B, C, and D the state space parameters and compute the `contextualized_states`.
+    A, D are input independent (see Mamba paper [1] Section 3.5.2 "Interpretation of A" for why A isn't selective)
+    ∆, B, C are input-dependent (this is a key difference between Mamba and the linear time invariant S4,
+    and is why Mamba is called **selective** state spaces)
+    """
+
     def __init__(self, args: ModelArgs):
         super().__init__()
         self.args = args
@@ -212,8 +172,10 @@ class MambaMixer(nn.Module):
         self.intermediate_size = args.intermediate_size
         self.time_step_rank = int(args.time_step_rank)
         self.use_conv_bias = args.use_conv_bias
-        self.use_bias = args.use_bias
 
+        self.act = nn.SiLU
+
+        self.in_proj = nn.Linear(self.hidden_size, self.intermediate_size * 2, bias=args.use_bias)
         self.conv1d = nn.Conv1d(
             in_channels=self.intermediate_size,
             out_channels=self.intermediate_size,
@@ -222,122 +184,52 @@ class MambaMixer(nn.Module):
             # groups=self.intermediate_size,
             padding=args.conv_kernel - 1,
         )
-
-        # projection of the input hidden states
-        self.in_proj = nn.Linear(self.hidden_size, self.intermediate_size * 2, bias=args.use_bias)
-        # selective projection used to make dt, B and C input dependant
         self.x_proj = nn.Linear(self.intermediate_size, self.time_step_rank + self.ssm_state_size * 2, bias=False)
-        # time step projection (discretization)
         self.dt_proj = nn.Linear(self.time_step_rank, self.intermediate_size, bias=True)
 
-        # S4D real initialization. These are not discretized!
-        # The core is to load them, compute the discrete states, then write the updated state. Keeps the memory bounded
+        dt_init_std = args.time_step_rank**-0.5 * args.time_step_scale
+
+        if args.time_step_init_scheme == "constant":
+            self.dt_proj.weight = dt_init_std * mx.ones_like(self.dt_proj.weight)
+        elif args.time_step_init_scheme == "random":
+            self.dt_proj.weight = mx.random.uniform(-dt_init_std, dt_init_std, self.dt_proj.weight.shape)
+        else:
+            raise NotImplementedError
+
+        dt = clamp(mx.exp(
+            mx.random.uniform(shape=[args.hidden_size]) * (math.log(args.time_step_max) - math.log(args.time_step_min)) + math.log(args.time_step_min)
+        ), min=args.time_step_floor)
+        inv_dt = dt + mx.log1p(-mx.exp(-dt)) # inverse of softplus: https://github.com/pytorch/pytorch/issues/72759
+        self.dt_proj.bias = inv_dt
+
         A = mx.repeat(mx.arange(1., 16 + 1.).reshape([1, 16]), repeats=args.hidden_size, axis=0)
         self.A_log = mx.log(A)
-        self.D = torch.ones(self.intermediate_size)
+        self.D = mx.ones([args.hidden_size])
+
         self.out_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=args.use_bias)
 
-    # def slow_forward(self, input_states, cache_params: Optional[MambaCache]=None):
-    #     batch_size, seq_len, _ = input_states.shape
-    #     dtype = input_states.dtype
-    #     # 1. Gated MLP's linear projection
-    #     projected_states = self.in_proj(input_states).transpose(1, 2)                   # [batch, 2 * intermediate_size, seq_len]
-    #     hidden_states, gate = projected_states.chunk(2, dim=1)
 
-    #     # 2. Convolution sequence transformation
-    #     if cache_params is not None:
-    #         ssm_state = cache_params.ssm_states[self.layer_idx].clone()
-    #         if cache_params.seqlen_offset > 0:
-    #             conv_state = cache_params.conv_states[self.layer_idx]                   # [batch, intermediate_size, conv_kernel_size]
-    #             conv_state = torch.roll(conv_state, shifts=-1, dims=-1)
-    #             conv_state[:, :, -1] = hidden_states[:, :, 0]
-    #             cache_params.conv_states[self.layer_idx].copy_(conv_state)
-    #             hidden_states = torch.sum(conv_state * self.conv1d.weight[:, 0, :], dim=-1)
-    #             if self.use_conv_bias:
-    #                 hidden_states += self.conv1d.bias
-    #             hidden_states = nn.sliu(hidden_states).to(dtype).unsqueeze(-1)         # [batch, intermediate_size, 1] : decoding
-    #         else:
-    #             conv_state = mx.pad(
-    #                 hidden_states,
-    #                 (self.conv_kernel_size - hidden_states.shape[-1], 0)
-    #             )
-    #             cache_params.conv_states[self.layer_idx].copy_(conv_state)
-    #             hidden_states = self.act(self.conv1d(hidden_states)[..., :seq_len])     # [batch, intermediate_size, seq_len]
-    #     else:
-    #         ssm_state = torch.zeros(
-    #             (batch_size, self.intermediate_size, self.ssm_state_size),
-    #             device=hidden_states.device, dtype=dtype
-    #         )
-    #         hidden_states = self.act(self.conv1d(hidden_states)[..., :seq_len])         # [batch, intermediate_size, seq_len]
-
-    #     # 3. State Space Model sequence transformation
-    #     # 3.a. Selection:  [batch, seq_len, self.time_step_rank + self.ssm_state_size * 2]
-    #     ssm_parameters = self.x_proj(hidden_states.transpose(1, 2))
-    #     time_step, B, C = torch.split(
-    #         ssm_parameters, [self.time_step_rank, self.ssm_state_size, self.ssm_state_size], dim=-1
-    #     )
-    #     discrete_time_step = self.dt_proj(time_step)                                    # [batch, seq_len, intermediate_size]
-    #     discrete_time_step = nn.functional.softplus(discrete_time_step).transpose(1, 2) # [batch, intermediate_size, seq_len]
-
-    #     # 3.b. Discretization: B and C to [batch, seq_len, intermediate_size, ssm_state_size] (SRAM)
-    #     A = -torch.exp(self.A_log.float())                                              # [intermediate_size, ssm_state_size]
-    #     discrete_A = torch.exp(A[None, :, None, :] * discrete_time_step[:, :, :, None]) # [batch, intermediate_size, seq_len, ssm_state_size]
-    #     discrete_B = discrete_time_step[:, :, :, None] * B[:, None, :, :].float()       # [batch, intermediate_size, seq_len, ssm_state_size]
-    #     deltaB_u = discrete_B * hidden_states[:, :, :, None].float()
-
-    #     # 3.c perform the recurrence y ← SSM(A, B, C)(x)
-    #     scan_outputs = []
-    #     for i in range(seq_len):
-    #         ssm_state = discrete_A[:, :, i, :] * ssm_state + deltaB_u[:, :, i, :]      # [batch, intermediate_size, ssm_state]
-    #         scan_output = torch.matmul(ssm_state.to(dtype), C[:, i, :].unsqueeze(-1))  # [batch, intermediate_size, 1]
-    #         scan_outputs.append(scan_output[:, :, 0])
-    #     scan_output = torch.stack(scan_outputs, dim=-1)                                # [batch, intermediate_size, seq_len]
-    #     scan_output = scan_output + (hidden_states * self.D[None, :, None])
-    #     scan_output = (scan_output * self.act(gate))
-
-    #     if cache_params is not None:
-    #         cache_params.ssm_states[self.layer_idx].copy_(ssm_state)
-
-    #     # 4. Final linear projection
-    #     contextualized_states = self.out_proj(scan_output.transpose(1, 2))  # [batch, seq_len, hidden_size]
-    #     return contextualized_states
-
-    def __call__(self, x):
-        # x : (B, L, D)
-
-        # y : (B, L, D)
-
+    def __call__(self, x: mx.array, cache: Optional[MambaCache]=None):
         _, L, _ = x.shape
+        xz = self.in_proj(x)
+        x, z = x.split(2, axis=2)
 
-        xz = self.in_proj(x) # (B, L, 2*ED)
-        x, z = xz.split(indices_or_sections=2, axis=2) # (B, L, ED), (B, L, ED)
+        # depthwise convolution over time, with a short filter
+        x = self.conv1d(x)[:, :L, :]
+        x = self.ssm(self.act(x))
 
-        # x branch
-        x = self.conv1d(x)[:, :L, :] # depthwise convolution over time, with a short filter
+        # z branch
+        z = self.act(z)
+        return self.out_proj(x * z)
 
-        x = nn.silu(x)
-        y = self.ssm(x)
-
-        # z branch
-        z = nn.silu(z)
-
-        output = y * z
-        output = self.out_proj(output) # (B, L, D)
-
-        return output
-
-    def ssm(self, x):
-        # x : (B, L, ED)
-
-        # y : (B, L, ED)
-
-        A = -mx.exp(self.A_log) # (ED, N)
+    def ssm(self, x: mx.array):
+        A = -mx.exp(self.A_log)
         D = self.D
 
-        deltaBC = self.x_proj(x) # (B, L, dt_rank+2*N)
+        deltaBC = self.x_proj(x)
 
-        delta, B, C = mx.split(deltaBC, indices_or_sections=[self.args.time_step_rank, self.args.time_step_rank+self.args.state_size], axis=-1) # (B, L, dt_rank), (B, L, N), (B, L, N)
-        delta = softplus(self.dt_proj(delta)) # (B, L, ED)
+        delta, B, C = mx.split(deltaBC, indices_or_sections=[self.args.time_step_rank, self.args.time_step_rank+self.args.hidden_size], axis=-1)
+        delta = softplus(self.dt_proj(delta))
 
         if self.args.pscan:
             y = self.selective_scan(x, delta, A, B, C, D)
@@ -347,15 +239,6 @@ class MambaMixer(nn.Module):
         return y
 
     def selective_scan(self, x, delta, A, B, C, D):
-        # x : (B, L, ED)
-        # Δ : (B, L, ED)
-        # A : (ED, N)
-        # B : (B, L, N)
-        # C : (B, L, N)
-        # D : (ED)
-
-        # y : (B, L, ED)
-
         deltaA = mx.exp(unsqueeze(delta, -1) * A) # (B, L, ED, N)
         deltaB = unsqueeze(delta, -1) * unsqueeze(B, 2) # (B, L, ED, N)
 
@@ -366,27 +249,17 @@ class MambaMixer(nn.Module):
         y = (hs @ unsqueeze(C, -1)).squeeze(3) # (B, L, ED, N) @ (B, L, N, 1) -> (B, L, ED, 1)
 
         y = y + D * x
-
         return y
 
     def selective_scan_seq(self, x, delta, A, B, C, D):
-        # x : (B, L, ED)
-        # Δ : (B, L, ED)
-        # A : (ED, N)
-        # B : (B, L, N)
-        # C : (B, L, N)
-        # D : (ED)
-
-        # y : (B, L, ED)
-
         _, L, _ = x.shape
 
-        deltaA = mx.exp(unsqueeze(delta, -1) * A) # (B, L, ED, N)
-        deltaB = unsqueeze(delta, -1) * unsqueeze(B, 2) # (B, L, ED, N)
+        deltaA = mx.exp(unsqueeze(delta, -1) * A)
+        deltaB = unsqueeze(delta, -1) * unsqueeze(B, 2)
 
-        BX = deltaB * unsqueeze(x, -1) # (B, L, ED, N)
+        BX = deltaB * unsqueeze(x, -1)
 
-        h = mx.zeros([x.shape[0], self.args.hidden_size, self.args.state_size]) # (B, ED, N)
+        h = mx.zeros([x.shape[0], self.args.hidden_size, self.args.state_size])
         hs = []
 
         for t in range(0, L):
@@ -395,40 +268,25 @@ class MambaMixer(nn.Module):
 
         hs = mx.stack(hs, axis=1)
 
-        y = (hs @ unsqueeze(C, -1)).squeeze(3) # (B, L, ED, N) @ (B, L, N, 1) -> (B, L, ED, 1)
+        y = (hs @ unsqueeze(C, -1)).squeeze(3)
 
         y = y + D * x
 
         return y
 
 
-import torch
+class MambaBlock(nn.Module):
+    def __init__(self, args: ModelArgs):
+        super().__init__()
+        self.args = args
 
-def torch_to_mlx_depthwise_weights(torch_weights):
-    torch_weights = torch_weights.moveaxis(2, 1)  # (channels, kernel_size, 1) = (ED, conv_kernel, 1)
-    channels, kernel_size, _ = torch_weights.shape
+        self.norm = nn.RMSNorm(args.hidden_size, eps=args.layer_norm_epsilon)
+        self.mixer = MambaMixer(args)
 
-    mlx_weights = torch.zeros(channels, kernel_size, channels)
-
-    indices = torch.arange(channels)
-    if torch_weights[:, :, 0].dtype == torch.bfloat16:
-        mlx_weights[indices, :, indices] = torch_weights[:, :, 0].float()
-    else:
-        mlx_weights[indices, :, indices] = torch_weights[:, :, 0]
-    return mlx_weights
-
-def map_mambapy_torch_to_mlx(weights):
-    new_state_dict = {}
-    for key, value in weights.items():
-        # from torch to mlx, we need to convert the conv weights (see misc.py for explanations)
-        if 'conv1d.weight' in key:
-            value = torch_to_mlx_depthwise_weights(value)
-
-        if 'conv1d' in key:
-            key = key.replace('conv1d', 'conv1d.conv1d')
-
-        new_state_dict[key] = value
-    return new_state_dict
+    def forward(self, x: mx.array, cache: Optional[MambaCache] = None):
+        r = self.mixer(self.norm(x), cache)
+        h = r + x
+        return h
 
 
 class MambaModel(nn.Module):
@@ -442,8 +300,13 @@ class MambaModel(nn.Module):
         self.layers = [MambaBlock(args) for _ in range(args.n_layer)]
         self.norm_f = nn.RMSNorm(args.hidden_size, eps=args.layer_norm_epsilon)
 
-    def __call__(self, x):
+    def __call__(self, x, cache):
         x = self.embeddings(x)
+
+        if cache is None:
+            cache_params = MambaCache(
+                self.config, x.size(0)
+            )
 
         for i, layer in enumerate(self.layers):
             x = layer(x)
@@ -463,19 +326,27 @@ class Model(nn.Module):
 
     def __call__(self, x, cache):
 
-        x, caches = self.backbone(x)
+        x, caches = self.backbone(x, cache)
 
-        return self.lm_head(x), cache
+        return self.lm_head(x)
 
-    def sanitize(self, weights):
-        for k in weights:
-            if "embedding." in k:
-                weights[k.replace("embedding.", "embeddings.")] = state_dict.pop(k)
-                break
-        return weights
+    # def sanitize(self, weights):
+    #     for k in weights:
+    #         if "embedding." in k:
+    #             weights[k.replace("embedding.", "embeddings.")] = state_dict.pop(k)
+    #             break
+    #     return weights
 
 
 
     @property
     def layers(self):
         return self.backbone.layers
+
+    @property
+    def head_dim(self):
+        return self.args.hidden_size // 32
+
+    @property
+    def n_kv_heads(self):
+        return 8

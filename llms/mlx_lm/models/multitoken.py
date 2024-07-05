@@ -215,8 +215,6 @@ class Model(nn.Module):
 
 model = Model(ModelArgs())
 
-print(model)
-
 tokens = mx.array([1])
 tokens = mx.expand_dims(tokens, axis=0)
 

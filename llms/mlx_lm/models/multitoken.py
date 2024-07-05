@@ -221,5 +221,10 @@ tokens = mx.array([1])
 tokens = mx.expand_dims(tokens, axis=0)
 
 output = model(tokens, return_all_heads=True)
+print(output)
 
+output = mx.softmax(output, axis=-1)
+print(output)
+
+output = mx.argmax(output)
 print(output)

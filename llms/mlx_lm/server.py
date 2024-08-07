@@ -78,6 +78,36 @@ def convert_chat(messages: List[dict], role_mapping: Optional[dict] = None):
     return prompt.rstrip()
 
 
+def convert_chat_with_tools(messages: List[dict], tools: List[dict], role_mapping: Optional[dict] = None):
+    default_role_mapping = {
+        "system_prompt": (
+            "A chat between a curious user and an artificial intelligence "
+            "assistant. The assistant follows the given rules no matter what."
+        ),
+        "system": "ASSISTANT's RULE: ",
+        "user": "USER: ",
+        "assistant": "ASSISTANT: ",
+        "stop": "\n",
+    }
+    role_mapping = role_mapping if role_mapping is not None else default_role_mapping
+
+    prompt = role_mapping.get("system_prompt", "") + role_mapping.get("stop", "")
+    prompt += "Available tools:\n"
+    for tool in tools:
+        tool_name = tool.get("name", "unknown")
+        tool_description = tool.get("description", "no description")
+        prompt += f"Tool: {tool_name}\nDescription: {tool_description}\n"
+
+    for line in messages:
+        role_prefix = role_mapping.get(line["role"], "")
+        stop = role_mapping.get("stop", "")
+        content = line.get("content", "")
+        prompt += f"{role_prefix}{content}{stop}"
+
+    prompt += role_mapping.get("assistant", "")
+    return prompt.rstrip()
+
+
 class ModelProvider:
     def __init__(self, cli_args: argparse.Namespace):
         """Load models on demand and persist them across the whole process."""
@@ -206,6 +236,7 @@ class APIHandler(BaseHTTPRequestHandler):
         self.repetition_context_size = self.body.get("repetition_context_size", 20)
         self.logit_bias = self.body.get("logit_bias", None)
         self.logprobs = self.body.get("logprobs", -1)
+        self.tools = self.body.get("tools", [])
         self.validate_model_parameters()
 
         # Load the model if needed
@@ -575,17 +606,29 @@ class APIHandler(BaseHTTPRequestHandler):
             "chat.completions.chunk" if self.stream else "chat.completions"
         )
 
+        tools = body.get("tools", [])
+
         if (
             hasattr(self.tokenizer, "apply_chat_template")
             and self.tokenizer.chat_template
         ):
+            # prompt = self.tokenizer.apply_chat_template(
+            #     body["messages"],
+            #     tokenize=True,
+            #     add_generation_prompt=True,
+            # )
             prompt = self.tokenizer.apply_chat_template(
                 body["messages"],
+                custom_tools=tools,
+                tools_in_user_message=True,
                 tokenize=True,
                 add_generation_prompt=True,
             )
         else:
-            prompt = convert_chat(body["messages"], body.get("role_mapping"))
+            if tools:
+                prompt = convert_chat_with_tools(body["messages"], tools, body.get("role_mapping"))
+            else:
+                prompt = convert_chat(body["messages"], body.get("role_mapping"))
             prompt = self.tokenizer.encode(prompt)
 
         return mx.array(prompt)

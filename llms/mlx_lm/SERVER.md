@@ -17,7 +17,7 @@ mlx_lm.server --model <path_to_model_or_hf_repo>
 For example:
 
 ```shell
-mlx_lm.server --model mlx-community/Mistral-7B-Instruct-v0.3-4bit
+mlx_lm.server --model mlx-community/Mistral-7B-Instruct-v0.3-2bit
 ```
 
 This will start a text generation server on port `8080` of the `localhost`
@@ -85,3 +85,10 @@ curl localhost:8080/v1/chat/completions \
 
 - `adapters`: (Optional) A string path to low-rank adapters. The path must be
   rlative to the directory the server was started in.
+
+
+git clone https://huggingface.co/mlx-community/Meta-Llama-3.1-8B-Instruct-4bit
+
+```shell
+mlx_lm.server --model mlx-community/Meta-Llama-3.1-8B-Instruct-4bit
+```

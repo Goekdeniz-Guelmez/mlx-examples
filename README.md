@@ -20,13 +20,16 @@ Some more useful examples are listed below.
 
 ### Image Models 
 
+- Generating images
+  - [FLUX](flux)
+  - [Stable Diffusion or SDXL](stable_diffusion)
 - Image classification using [ResNets on CIFAR-10](cifar).
-- Generating images with [Stable Diffusion or SDXL](stable_diffusion).
 - Convolutional variational autoencoder [(CVAE) on MNIST](cvae).
 
 ### Audio Models
 
 - Speech recognition with [OpenAI's Whisper](whisper).
+- Audio compression and generation with [Meta's EnCodec](encodec).
 
 ### Multimodal models
 

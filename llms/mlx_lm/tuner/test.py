@@ -1,5 +1,4 @@
-# In your training script
-from orpo_trainer import train_orpo
+from orpo_trainer import train_orpo, ORPOTrainingArgs
 import mlx_lm
 import mlx.optimizers as optim
 from typing import List, Dict
@@ -7,7 +6,7 @@ from typing import List, Dict
 data = [
     {
         "prompt": "What is the capital of France?",
-        "chosen": "The capital of France is Paris.",
+        "chosen": "<|im_start|>system\nYou are a cool assistant.<|im_end|>\n<|im_start|>user\nWhat is the capital of France?<|im_end|>\n<|im_start|>assistant\nThe capital of France is Paris.<|im_end|>",
         "rejected": "<|im_start|>system\nYou are a cool assistant.<|im_end|>\n<|im_start|>user\nWhat is the capital of France?<|im_end|>\n<|im_start|>assistant\nThe capital of France is London.<|im_end|>"
     },
     {
@@ -17,7 +16,7 @@ data = [
     },
     {
         "prompt": "What is the capital of France?",
-        "chosen": "The capital of France is Paris.",
+        "chosen": "<|im_start|>system\nYou are a cool assistant.<|im_end|>\n<|im_start|>user\nWhat is the capital of France?<|im_end|>\n<|im_start|>assistant\nThe capital of France is Paris.<|im_end|>",
         "rejected": "<|im_start|>system\nYou are a cool assistant.<|im_end|>\n<|im_start|>user\nWhat is the capital of France?<|im_end|>\n<|im_start|>assistant\nThe capital of France is London.<|im_end|>"
     },
     {
@@ -28,20 +27,38 @@ data = [
 ]
 
 class SimpleDataset:
-    def __init__(self, data: List[Dict]):
-        self.data = data
+    def __init__(self, data: List[Dict], tokenizer):
+        # Pre-tokenize all the data
+        self.tokenized_data = []
+        for item in data:
+            tokenized_item = {
+                "prompt": item["prompt"],
+                "chosen": tokenizer.encode(item["chosen"]),
+                "rejected": tokenizer.encode(item["rejected"])
+            }
+            self.tokenized_data.append(tokenized_item)
     
     def __len__(self):
-        return len(self.data)
+        return len(self.tokenized_data)
     
     def __getitem__(self, idx):
-        return self.data[idx]
-
-train_dataset = SimpleDataset(data)
-val_dataset = SimpleDataset(data)  # Just use first example for validation
+        return self.tokenized_data[idx]
 
 model, tokenizer = mlx_lm.load("mlx-community/Josiefied-Qwen2.5-0.5B-Instruct-abliterated-v1-4bit")
+
+train_dataset = SimpleDataset(data, tokenizer)
+val_dataset = SimpleDataset(data, tokenizer)
+
 optimizer = optim.Adam(learning_rate=1e-5)
+
+training_args = ORPOTrainingArgs(
+    batch_size=2,
+    iters=1000,
+    max_seq_length=2048,
+    steps_per_eval=100,
+    steps_per_report=10,
+    alpha=0.1
+)
 
 # Training
 train_orpo(
@@ -49,5 +66,6 @@ train_orpo(
     tokenizer=tokenizer,
     optimizer=optimizer,
     train_dataset=train_dataset,
-    val_dataset=val_dataset
+    val_dataset=val_dataset,
+    args=training_args
 )

@@ -94,12 +94,14 @@ def linear_to_lora_layers(
         "phimoe",
         "gemma",
         "gemma2",
+        "helium",
         "starcoder2",
         "cohere",
         "cohere2",
         "minicpm",
         "deepseek",
         "olmo2",
+        "internlm3",
     ]:
         keys = set(["self_attn.q_proj", "self_attn.v_proj"])
         if model.model_type in ["mixtral", "phimoe"]:

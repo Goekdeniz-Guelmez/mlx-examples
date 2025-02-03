@@ -2,6 +2,7 @@
 
 import math
 from dataclasses import dataclass
+from functools import partial
 from typing import Any, Dict, Optional, Tuple
 
 import mlx.core as mx
@@ -123,6 +124,12 @@ class DeepseekV3YarnRotaryEmbedding(nn.Module):
             offset=offset,
             freqs=self._freqs,
         )
+
+
+# A clipped silu to prevent fp16 from overflowing
+@partial(mx.compile, shapeless=True)
+def clipped_silu(x):
+    return mx.clip(x * mx.sigmoid(x), a_min=-100, a_max=100)
 
 
 class DeepseekV3Attention(nn.Module):
@@ -312,7 +319,10 @@ class DeepseekV3MoE(nn.Module):
         self.config = config
         self.num_experts_per_tok = config.num_experts_per_tok
         self.switch_mlp = SwitchGLU(
-            config.hidden_size, config.moe_intermediate_size, config.n_routed_experts
+            config.hidden_size,
+            config.moe_intermediate_size,
+            config.n_routed_experts,
+            activation=clipped_silu,
         )
 
         self.gate = MoEGate(config)
@@ -359,11 +369,7 @@ class DeepseekV3DecoderLayer(nn.Module):
         r = self.self_attn(self.input_layernorm(x), mask, cache)
         h = x + r
         r = self.mlp(self.post_attention_layernorm(h))
-        out = h + r
-        # Protect against overflow for fp16
-        if out.dtype == mx.float16:
-            out = mx.clip(out, a_min=None, a_max=mx.finfo(mx.float16).max - 1000)
-        return out
+        return h + r
 
 
 class DeepseekV3Model(nn.Module):
@@ -375,6 +381,10 @@ class DeepseekV3Model(nn.Module):
             DeepseekV3DecoderLayer(config, idx)
             for idx in range(config.num_hidden_layers)
         ]
+        self.start_idx = 0
+        self.end_idx = len(self.layers)
+        self.num_layers = self.end_idx
+
         self.norm = nn.RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.pipeline_rank = 0
         self.pipeline_size = 1
@@ -388,7 +398,11 @@ class DeepseekV3Model(nn.Module):
             len(self.layers) + self.pipeline_size - 1
         ) // self.pipeline_size
         start = (self.pipeline_size - self.pipeline_rank - 1) * layers_per_rank
-        self.layers = self.layers[start : start + layers_per_rank]
+        self.start_idx = (self.pipeline_size - self.pipeline_rank - 1) * layers_per_rank
+        self.end_idx = self.start_idx + layers_per_rank
+        self.num_layers = layers_per_rank
+        self.layers = self.layers[: self.end_idx]
+        self.layers[: self.start_idx] = [None] * self.start_idx
 
     def __call__(
         self,
@@ -400,25 +414,30 @@ class DeepseekV3Model(nn.Module):
 
         pipeline_rank = self.pipeline_rank
         pipeline_size = self.pipeline_size
+        # Hack to avoid time-outs during prompt-processing
+        dist_stream = mx.cpu if h.shape[1] > 1 else mx.gpu
         if mask is None:
             mask = create_attention_mask(h, cache)
 
         if cache is None:
-            cache = [None] * len(self.layers)
+            cache = [None] * self.num_layers
 
         # Receive from the previous process in the pipeline
-        if pipeline_rank < pipeline_size - 1:
-            h = mx.distributed.recv_like(h, (pipeline_rank + 1))
 
-        for layer, c in zip(self.layers, cache):
-            h = layer(h, mask, c)
+        if pipeline_rank < pipeline_size - 1:
+            h = mx.distributed.recv_like(h, (pipeline_rank + 1), stream=dist_stream)
+
+        for i in range(self.num_layers):
+            h = self.layers[self.start_idx + i](h, mask, cache[i])
 
         # Send to the next process in the pipeline
         if pipeline_rank != 0:
-            h = mx.distributed.send(h, (pipeline_rank - 1) % pipeline_size)
+            h = mx.distributed.send(
+                h, (pipeline_rank - 1) % pipeline_size, stream=dist_stream
+            )
 
         # Broadcast h while keeping it in the graph
-        h = mx.distributed.all_gather(h)[: h.shape[0]]
+        h = mx.distributed.all_gather(h, stream=dist_stream)[: h.shape[0]]
 
         return self.norm(h)
 
@@ -457,4 +476,4 @@ class Model(nn.Module):
 
     @property
     def layers(self):
-        return self.model.layers
+        return self.model.layers[self.model.start_idx : self.model.end_idx]

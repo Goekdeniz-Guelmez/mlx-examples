@@ -29,18 +29,18 @@ class GRPODataset:
             if use_chat_template:
                 prompt_tokens = tokenizer.apply_chat_template(
                     [
-                        {'role': 'system', 'content': """A conversation between User and Assistant. The user asks a question, and the Assistant solves it.
-                The assistantfirst thinks about the reasoning process in the mind and then provides the user with the answer.
-                The reasoning process and answer are enclosed within <think> </think> and <answer> </answer> tags, respectively, i.e., <think> reasoning process here </think><answer> answer here </answer>."""},
+                        {'role': 'system', 'content': """A conversation between the User (Gökdeniz Gülmez) and Assistant (Josie). Gökdeniz asks a question, and Josie solves it.
+                Josie first thinks about the reasoning process in the mind and then provides Gökdeniz with the answer.
+                The reasoning process and answer are enclosed within <josie_thinks> </josie_thinks> and <josie_answers> </josie_answers> tags, respectively, i.e., <josie_thinks> reasoning process here </josie_thinks><josie_answers> answer here </josie_answers>."""},
                     {'role': 'user', 'content': prompt_str}
                     ],
                 )
                 answer_tokens = tokenizer.encode(answer_str)
             else:
                 if use_prompt:
-                    prompt_tokens = tokenizer.encode(f"""A conversation between User and Assistant. The user asks a question, and the Assistant solves it.
-            The assistantfirst thinks about the reasoning process in the mind and then provides the user with the answer.
-            The reasoning process and answer are enclosed within <think> </think> and <answer> </answer> tags, respectively, i.e., <think> reasoning process here </think><answer> answer here </answer>.
+                    prompt_tokens = tokenizer.encode(f"""A conversation between User and Assistant. The user asks a question, and Josie solves it.
+            Josie first thinks about the reasoning process in the mind and then provides Gökdeniz with the answer.
+            The reasoning process and answer are enclosed within <josie_thinks> </josie_thinks> and <josie_answers> </josie_answers> tags, respectively, i.e., <josie_thinks> reasoning process here </josie_thinks><josie_answers> answer here </josie_answers>.
             User: {prompt_str} Assistant: """)
                 else:
                     prompt_tokens = tokenizer.encode(prompt_str)

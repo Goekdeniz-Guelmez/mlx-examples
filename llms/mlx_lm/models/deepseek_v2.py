@@ -282,12 +282,12 @@ class MoEGate(nn.Module):
         if self.topk_method == "group_limited_greedy":
             bsz, seq_len = x.shape[:2]
             scores = scores.reshape(bsz, seq_len, self.n_group, -1)
-            group_scores = scores.max(axis=-1)
+            group_scores = scores.max(axis=-1, keepdims=True)
             k = self.n_group - self.topk_group
-            group_idx = mx.argpartition(group_scores, kth=k - 1, axis=-1)[..., :k]
-            batch_idx = mx.expand_dims(mx.arange(bsz), (1, 2))
-            seq_idx = mx.expand_dims(mx.arange(seq_len), (0, 2))
-            scores[batch_idx, seq_idx, group_idx] = 0.0
+            group_idx = mx.argpartition(group_scores, kth=k - 1, axis=-2)[..., :k, :]
+            scores = mx.put_along_axis(
+                scores, group_idx, mx.array(0.0, scores.dtype), axis=-2
+            )
             scores = scores.reshape(bsz, seq_len, -1)
 
         k = self.top_k
@@ -378,14 +378,17 @@ class DeepseekV2Model(nn.Module):
         # rank=pipeline_size-1 gets the first
         self.pipeline_rank = group.rank()
         self.pipeline_size = group.size()
-        layers_per_rank = (
-            len(self.layers) + self.pipeline_size - 1
-        ) // self.pipeline_size
+        layers_per_rank = len(self.layers) // self.pipeline_size
+        extra = len(self.layers) - layers_per_rank * self.pipeline_size
+        if self.pipeline_rank < extra:
+            layers_per_rank += 1
+
         self.start_idx = (self.pipeline_size - self.pipeline_rank - 1) * layers_per_rank
         self.end_idx = self.start_idx + layers_per_rank
         self.num_layers = layers_per_rank
         self.layers = self.layers[: self.end_idx]
         self.layers[: self.start_idx] = [None] * self.start_idx
+        self.num_layers = len(self.layers) - self.start_idx
 
     def __call__(
         self,

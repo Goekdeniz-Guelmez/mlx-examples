@@ -62,6 +62,7 @@ CONFIG_DEFAULTS = {
     "grad_checkpoint": False,
     "lr_schedule": None,
     "lora_parameters": {"rank": 8, "alpha": 16, "dropout": 0.0, "scale": 10.0},
+    "mask_prompt": False,
 }
 
 
@@ -99,7 +100,7 @@ def build_parser():
         "--mask-prompt",
         action="store_true",
         help="Mask the prompt in the loss when training",
-        default=False,
+        default=None,
     )
 
     parser.add_argument(
@@ -181,8 +182,14 @@ def train_model(
     training_callback: TrainingCallback = None,
 ):
     model.freeze()
+    if args.num_layers > len(model.layers):
+        raise ValueError(
+            f"Requested to train {args.num_layers} layers "
+            f"but the model only has {len(model.layers)} layers."
+        )
+
     if args.fine_tune_type == "full":
-        for l in model.layers[-min(args.num_layers, 0) :]:
+        for l in model.layers[-max(args.num_layers, 0) :]:
             l.unfreeze()
     elif args.fine_tune_type in ["lora", "dora"]:
         # Convert linear layers to lora/dora layers and unfreeze in the process

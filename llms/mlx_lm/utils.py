@@ -191,7 +191,9 @@ def get_model_path(path_or_hf_repo: str, revision: Optional[str] = None) -> Path
                         "*.py",
                         "tokenizer.model",
                         "*.tiktoken",
+                        "tiktoken.model",
                         "*.txt",
+                        "*.jsonl",
                     ],
                 )
             )
@@ -409,8 +411,7 @@ def speculative_generate_step(
             for processor in logits_processors:
                 logits = processor(tokens, logits)
 
-        logprobs = logits - mx.logsumexp(logits, keepdims=True)
-        logprobs = logprobs.squeeze(0)
+        logprobs = logits - mx.logsumexp(logits, axis=-1, keepdims=True)
         y = sampler(logprobs)
         return y, logprobs
 
@@ -429,16 +430,14 @@ def speculative_generate_step(
                     prev_tokens = (
                         mx.concat([prev_tokens, y]) if prev_tokens is not None else y
                     )
-                    y, logprobs = _process_and_sample(
-                        prev_tokens, logits[:, i : i + 1, :]
-                    )
+                    y, logprobs = _process_and_sample(prev_tokens, logits[:, i, :])
                     out_y.append(y)
                     out_logprobs.append(logprobs)
                 return mx.concatenate(out_y, axis=0), mx.concatenate(
                     out_logprobs, axis=0
                 )
             else:
-                return _process_and_sample(None, logits)
+                return _process_and_sample(None, logits.squeeze(0))
 
     def _prefill(model, cache, y):
         while y.size > prefill_step_size:
@@ -476,13 +475,9 @@ def speculative_generate_step(
             num_draft = min(max_tokens - ntoks, num_draft_tokens)
             draft_tokens = _draft_generate(draft_y, num_draft)
             if prev_tokens is not None:
-                prev_tokens = prev_tokens[
-                    : prev_tokens.size - draft_y.size - num_draft + 1
-                ]
+                prev_tokens = prev_tokens[: prev_tokens.size - y.size - num_draft + 1]
             y = mx.concatenate([y, draft_tokens])
-
             tokens, logprobs = _step(model, model_cache, y, num_draft + 1)
-
             mx.eval(tokens, draft_tokens)
             draft_tokens = draft_tokens.tolist()
             tokens = tokens.tolist()
@@ -514,8 +509,8 @@ def speculative_generate_step(
                     [mx.array(draft_tokens[-1:], mx.uint32), draft_y]
                 )
 
-            if prev_tokens is not None and n < num_draft:
-                prev_tokens = prev_tokens[: -(num_draft - n)]
+            if prev_tokens is not None:
+                prev_tokens = prev_tokens[: -max(num_draft - n, 1)]
             _rewind_cache(num_draft, n)
     finally:
         _rewind_cache(num_draft, n)
@@ -1019,6 +1014,46 @@ def save_config(
     # write the updated config to the config_path (if provided)
     with open(config_path, "w") as fid:
         json.dump(config, fid, indent=4)
+
+
+def mixed_quant_predicate_builder(
+    low_bits: int = 4, high_bits: int = 4, group_size: int = 64
+) -> Callable[[str, nn.Module, dict], Union[bool, dict]]:
+    def mixed_quant_predicate(
+        path: str,
+        module: nn.Module,
+        config: dict,
+    ) -> Union[bool, dict]:
+        """Implements mixed quantization predicates with similar choices to, for example, llama.cpp's Q4_K_M.
+        Ref: https://github.com/ggerganov/llama.cpp/blob/917786f43d0f29b7c77a0c56767c0fa4df68b1c5/src/llama.cpp#L5265
+        By Alex Barron: https://gist.github.com/barronalex/84addb8078be21969f1690c1454855f3
+        """
+
+        if not hasattr(module, "to_quantized"):
+            return False
+
+        index = int(path.split(".")[2]) if len(path.split(".")) > 2 else 0
+
+        num_layers = config["num_hidden_layers"]
+        use_more_bits = (
+            index < num_layers // 8
+            or index >= 7 * num_layers // 8
+            or (index - num_layers // 8) % 3 == 2
+        )
+        if "v_proj" in path and use_more_bits:
+            return {"group_size": group_size, "bits": high_bits}
+        if "down_proj" in path and use_more_bits:
+            return {"group_size": group_size, "bits": high_bits}
+        if "lm_head" in path:
+            return {"group_size": group_size, "bits": high_bits}
+
+        return {"group_size": group_size, "bits": low_bits}
+
+    return mixed_quant_predicate
+
+
+mixed_3_6 = mixed_quant_predicate_builder(low_bits=3)
+mixed_2_6 = mixed_quant_predicate_builder(low_bits=2)
 
 
 def convert(
